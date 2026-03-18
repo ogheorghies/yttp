@@ -64,7 +64,7 @@ h:
 
 # --- Request (input) body ---
 b:                                   # encoding depends on Content-Type:
-  city: Berlin                       #   application/json (default)
+  city: Berlin                       #   application/json (default, c!: j! is implied)
   lang: de                           #   c!: f! → form-urlencoded
                                      #   c!: m! → multipart (file:// values read from disk)
 ```
