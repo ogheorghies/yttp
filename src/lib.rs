@@ -1,0 +1,480 @@
+//! # yttp - "Better HTTP"
+//!
+//! A JSON/YAML façade for HTTP requests and responses.
+//! Provides header shortcuts, smart auth, content-type-driven body encoding,
+//! and structured response formatting.
+
+mod shortcut;
+
+use base64::{Engine, engine::general_purpose::STANDARD};
+use serde_json::{Map, Value};
+use std::fmt;
+
+pub use shortcut::expand_headers;
+
+/// Error type for yttp operations.
+#[derive(Debug)]
+pub enum Error {
+    Parse(String),
+    Request(String),
+    Url(String),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::Parse(msg) => write!(f, "parse error: {msg}"),
+            Error::Request(msg) => write!(f, "request error: {msg}"),
+            Error::Url(msg) => write!(f, "URL error: {msg}"),
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+/// Parsed HTTP request, ready to send.
+pub struct Request {
+    pub method: String,
+    pub url: String,
+    pub headers: Map<String, Value>,
+    pub body: Option<Value>,
+}
+
+/// URL components.
+pub struct UrlParts {
+    pub scheme: String,
+    pub host: String,
+    pub port: String,
+    pub path: String,
+    pub query: String,
+    pub fragment: String,
+}
+
+/// Structured status.
+pub struct Status {
+    pub line: String,
+    pub version: String,
+    pub code: u16,
+    pub text: String,
+}
+
+/// Structured response.
+pub struct Response {
+    pub status: Status,
+    pub headers_raw: String,
+    pub headers: Map<String, Value>,
+    pub body: Vec<u8>,
+}
+
+/// Parse a JSON/YAML string into a serde_json::Value.
+pub fn parse(s: &str) -> Result<Value> {
+    serde_json::from_str(s).or_else(|_| {
+        serde_yml::from_str(s)
+            .map_err(|e| Error::Parse(format!("invalid JSON or YAML: {e}")))
+    })
+}
+
+/// Parse a request from a JSON/YAML value, expanding header shortcuts.
+pub fn parse_request(val: &Value) -> Result<Request> {
+    let obj = val
+        .as_object()
+        .ok_or_else(|| Error::Request("request must be a JSON/YAML object".into()))?;
+
+    let mut method = None;
+    let mut url = None;
+    let mut headers = None;
+    let mut body = None;
+
+    for (key, v) in obj {
+        if let Some(m) = resolve_method(key) {
+            method = Some(m.to_string());
+            url = Some(
+                v.as_str()
+                    .ok_or_else(|| Error::Request(format!("URL for method '{key}' must be a string")))?
+                    .to_string(),
+            );
+        } else {
+            match key.to_lowercase().as_str() {
+                "h" | "headers" => headers = Some(v.clone()),
+                "b" | "body" => body = Some(v.clone()),
+                _ => {}
+            }
+        }
+    }
+
+    let mut header_map = headers
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    expand_headers(&mut header_map);
+
+    Ok(Request {
+        method: method
+            .ok_or_else(|| Error::Request("no HTTP method found".into()))?,
+        url: url
+            .ok_or_else(|| Error::Request("no URL found".into()))?,
+        headers: header_map,
+        body,
+    })
+}
+
+/// Parse URL into components.
+pub fn parse_url(url_str: &str) -> Result<UrlParts> {
+    let parsed = url::Url::parse(url_str)
+        .map_err(|e| Error::Url(format!("{e}")))?;
+    Ok(UrlParts {
+        scheme: parsed.scheme().to_string(),
+        host: parsed.host_str().unwrap_or("").to_string(),
+        port: parsed.port().map(|p| p.to_string()).unwrap_or_default(),
+        path: parsed.path().trim_start_matches('/').to_string(),
+        query: parsed.query().unwrap_or("").to_string(),
+        fragment: parsed.fragment().unwrap_or("").to_string(),
+    })
+}
+
+/// Encode response body for structured output: JSON → value, UTF-8 → string, binary → base64.
+pub fn encode_body(bytes: &[u8]) -> Value {
+    if let Ok(json_val) = serde_json::from_slice::<Value>(bytes) {
+        return json_val;
+    }
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return Value::String(s.to_string());
+    }
+    Value::String(STANDARD.encode(bytes))
+}
+
+/// Format status as an inline object {v, c, t}.
+pub fn status_inline(status: &Status) -> Value {
+    let mut m = Map::new();
+    m.insert("v".to_string(), Value::String(status.version.clone()));
+    m.insert("c".to_string(), Value::Number(status.code.into()));
+    m.insert("t".to_string(), Value::String(status.text.clone()));
+    Value::Object(m)
+}
+
+/// Format a full response as a structured value (s!, h, b).
+pub fn format_response(resp: &Response) -> Value {
+    let mut map = Map::new();
+    map.insert("s".to_string(), status_inline(&resp.status));
+    map.insert("h".to_string(), Value::Object(resp.headers.clone()));
+    map.insert("b".to_string(), encode_body(&resp.body));
+    Value::Object(map)
+}
+
+/// Build request headers as raw HTTP string.
+pub fn headers_to_raw(headers: &Map<String, Value>) -> String {
+    let mut raw = String::new();
+    for (k, v) in headers {
+        if let Some(s) = v.as_str() {
+            raw.push_str(&format!("{k}: {s}\r\n"));
+        }
+    }
+    raw
+}
+
+fn resolve_method(key: &str) -> Option<&'static str> {
+    match key.to_lowercase().as_str() {
+        "get" | "g" => Some("GET"),
+        "post" | "p" => Some("POST"),
+        "put" => Some("PUT"),
+        "delete" | "d" => Some("DELETE"),
+        "patch" => Some("PATCH"),
+        "head" => Some("HEAD"),
+        "options" => Some("OPTIONS"),
+        "trace" => Some("TRACE"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // --- parse ---
+
+    #[test]
+    fn parse_json() {
+        let val = parse(r#"{"g": "https://example.com"}"#).unwrap();
+        assert_eq!(val["g"], "https://example.com");
+    }
+
+    #[test]
+    fn parse_yaml_block() {
+        let val = parse("g: https://example.com\nh:\n  Accept: j!\n").unwrap();
+        assert_eq!(val["g"], "https://example.com");
+        assert_eq!(val["h"]["Accept"], "j!");
+    }
+
+    #[test]
+    fn parse_yaml_flow() {
+        let val = parse("{g: https://example.com, h: {Accept: j!}}").unwrap();
+        assert_eq!(val["g"], "https://example.com");
+    }
+
+    #[test]
+    fn parse_invalid() {
+        assert!(parse("{{invalid}}").is_err());
+    }
+
+    // --- parse_request ---
+
+    #[test]
+    fn parse_request_get() {
+        let val = parse("{g: https://example.com}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url, "https://example.com");
+        assert!(req.body.is_none());
+    }
+
+    #[test]
+    fn parse_request_post_with_body() {
+        let val = parse(r#"{"p": "https://example.com", "b": {"key": "val"}}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.body.unwrap()["key"], "val");
+    }
+
+    #[test]
+    fn parse_request_method_case_insensitive() {
+        let val = parse(r#"{"GET": "https://example.com"}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.method, "GET");
+    }
+
+    #[test]
+    fn parse_request_no_method() {
+        let val = parse(r#"{"h": {"Accept": "j!"}}"#).unwrap();
+        assert!(parse_request(&val).is_err());
+    }
+
+    #[test]
+    fn parse_request_not_object() {
+        let val = Value::String("not an object".into());
+        assert!(parse_request(&val).is_err());
+    }
+
+    #[test]
+    fn parse_request_all_methods() {
+        for (short, full) in &[
+            ("g", "GET"),
+            ("p", "POST"),
+            ("d", "DELETE"),
+            ("put", "PUT"),
+            ("patch", "PATCH"),
+            ("head", "HEAD"),
+            ("options", "OPTIONS"),
+            ("trace", "TRACE"),
+        ] {
+            let val = parse(&format!("{{{short}: https://example.com}}")).unwrap();
+            let req = parse_request(&val).unwrap();
+            assert_eq!(req.method, *full);
+        }
+    }
+
+    // --- header shortcuts ---
+
+    #[test]
+    fn header_bearer_bare_token() {
+        let val = parse("{g: https://example.com, h: {a!: my-token}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.headers["Authorization"], "Bearer my-token");
+    }
+
+    #[test]
+    fn header_bearer_explicit() {
+        let val = parse("{g: https://example.com, h: {a!: bearer!tok}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.headers["Authorization"], "Bearer tok");
+    }
+
+    #[test]
+    fn header_basic_array() {
+        let val = parse(r#"{"g": "https://example.com", "h": {"a!": ["user", "pass"]}}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.headers["Authorization"], "Basic dXNlcjpwYXNz");
+    }
+
+    #[test]
+    fn header_basic_explicit() {
+        let val = parse("{g: https://example.com, h: {a!: basic!user:pass}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.headers["Authorization"], "Basic dXNlcjpwYXNz");
+    }
+
+    #[test]
+    fn header_auth_scheme_passthrough() {
+        let val = parse("{g: https://example.com, h: {a!: Digest abc123}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.headers["Authorization"], "Digest abc123");
+    }
+
+    #[test]
+    fn header_content_type_shortcut() {
+        let val = parse("{g: https://example.com, h: {c!: f!}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(
+            req.headers["Content-Type"],
+            "application/x-www-form-urlencoded"
+        );
+    }
+
+    #[test]
+    fn header_value_shortcuts() {
+        let cases = vec![
+            ("j!", "application/json"),
+            ("json!", "application/json"),
+            ("f!", "application/x-www-form-urlencoded"),
+            ("m!", "multipart/form-data"),
+            ("h!", "text/html"),
+            ("t!", "text/plain"),
+            ("x!", "application/xml"),
+        ];
+        for (shortcut, expected) in cases {
+            let val =
+                parse(&format!("{{g: https://example.com, h: {{Accept: {shortcut}}}}}")).unwrap();
+            let req = parse_request(&val).unwrap();
+            assert_eq!(req.headers["Accept"], expected, "shortcut {shortcut}");
+        }
+    }
+
+    #[test]
+    fn header_prefix_shortcuts() {
+        let cases = vec![
+            ("a!/json", "application/json"),
+            ("t!/csv", "text/csv"),
+            ("i!/png", "image/png"),
+        ];
+        for (shortcut, expected) in cases {
+            let val =
+                parse(&format!("{{g: https://example.com, h: {{Accept: {shortcut}}}}}")).unwrap();
+            let req = parse_request(&val).unwrap();
+            assert_eq!(req.headers["Accept"], expected, "prefix {shortcut}");
+        }
+    }
+
+    // --- parse_url ---
+
+    #[test]
+    fn parse_url_parts() {
+        let parts = parse_url("https://example.com:8080/api/items?q=test#section").unwrap();
+        assert_eq!(parts.scheme, "https");
+        assert_eq!(parts.host, "example.com");
+        assert_eq!(parts.port, "8080");
+        assert_eq!(parts.path, "api/items");
+        assert_eq!(parts.query, "q=test");
+        assert_eq!(parts.fragment, "section");
+    }
+
+    #[test]
+    fn parse_url_defaults() {
+        let parts = parse_url("https://example.com/path").unwrap();
+        assert_eq!(parts.port, "");
+        assert_eq!(parts.query, "");
+        assert_eq!(parts.fragment, "");
+    }
+
+    #[test]
+    fn parse_url_invalid() {
+        assert!(parse_url("not a url").is_err());
+    }
+
+    // --- encode_body ---
+
+    #[test]
+    fn encode_body_json() {
+        let body = encode_body(b"[1, 2, 3]");
+        assert!(body.is_array());
+        assert_eq!(body[0], 1);
+    }
+
+    #[test]
+    fn encode_body_json_object() {
+        let body = encode_body(br#"{"key": "val"}"#);
+        assert!(body.is_object());
+        assert_eq!(body["key"], "val");
+    }
+
+    #[test]
+    fn encode_body_utf8() {
+        let body = encode_body(b"hello world");
+        assert_eq!(body, "hello world");
+    }
+
+    #[test]
+    fn encode_body_binary() {
+        let bytes = vec![0xff, 0xfe, 0x00, 0x01];
+        let body = encode_body(&bytes);
+        assert!(body.is_string());
+        let s = body.as_str().unwrap();
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(s)
+                .unwrap(),
+            bytes
+        );
+    }
+
+    // --- status_inline ---
+
+    #[test]
+    fn status_inline_format() {
+        let status = Status {
+            line: "HTTP/1.1 200 OK".to_string(),
+            version: "HTTP/1.1".to_string(),
+            code: 200,
+            text: "OK".to_string(),
+        };
+        let val = status_inline(&status);
+        assert_eq!(val["v"], "HTTP/1.1");
+        assert_eq!(val["c"], 200);
+        assert_eq!(val["t"], "OK");
+    }
+
+    // --- format_response ---
+
+    #[test]
+    fn format_response_structure() {
+        let resp = Response {
+            status: Status {
+                line: "HTTP/1.1 200 OK".to_string(),
+                version: "HTTP/1.1".to_string(),
+                code: 200,
+                text: "OK".to_string(),
+            },
+            headers_raw: "content-type: application/json\r\n".to_string(),
+            headers: {
+                let mut m = Map::new();
+                m.insert(
+                    "content-type".to_string(),
+                    Value::String("application/json".to_string()),
+                );
+                m
+            },
+            body: br#"{"id": 1}"#.to_vec(),
+        };
+        let val = format_response(&resp);
+        assert_eq!(val["s"]["c"], 200);
+        assert_eq!(val["h"]["content-type"], "application/json");
+        assert_eq!(val["b"]["id"], 1);
+    }
+
+    // --- headers_to_raw ---
+
+    #[test]
+    fn headers_to_raw_format() {
+        let mut headers = Map::new();
+        headers.insert(
+            "Accept".to_string(),
+            Value::String("application/json".to_string()),
+        );
+        headers.insert(
+            "Host".to_string(),
+            Value::String("example.com".to_string()),
+        );
+        let raw = headers_to_raw(&headers);
+        assert!(raw.contains("Accept: application/json\r\n"));
+        assert!(raw.contains("Host: example.com\r\n"));
+    }
+}
