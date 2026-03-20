@@ -15,15 +15,34 @@ pub use shortcut::expand_headers;
 /// Error type for yttp operations.
 #[derive(Debug)]
 pub enum Error {
-    Parse(String),
+    Parse {
+        msg: String,
+        line: Option<usize>,
+        column: Option<usize>,
+    },
     Request(String),
     Url(String),
+}
+
+impl Error {
+    /// Create a parse error with position info.
+    pub fn parse(msg: impl Into<String>, line: Option<usize>, column: Option<usize>) -> Self {
+        Error::Parse { msg: msg.into(), line, column }
+    }
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Parse(msg) => write!(f, "parse error: {msg}"),
+            Error::Parse { msg, line, column } => {
+                write!(f, "parse error: {msg}")?;
+                match (line, column) {
+                    (Some(l), Some(c)) => write!(f, " (line {l}, column {c})"),
+                    (Some(l), None) => write!(f, " (line {l})"),
+                    (None, Some(c)) => write!(f, " (column {c})"),
+                    (None, None) => Ok(()),
+                }
+            }
             Error::Request(msg) => write!(f, "request error: {msg}"),
             Error::Url(msg) => write!(f, "URL error: {msg}"),
         }
@@ -69,11 +88,40 @@ pub struct Response {
 }
 
 /// Parse a JSON/YAML string into a serde_json::Value.
+///
+/// Tries JSON first, then YAML. On failure, returns `Error::Parse` with
+/// position info extracted from the serde error. For JSON-like input
+/// (starts with `{`), the JSON parser's position is preferred since YAML
+/// may parse partial JSON differently.
 pub fn parse(s: &str) -> Result<Value> {
-    serde_json::from_str(s).or_else(|_| {
-        serde_yml::from_str(s)
-            .map_err(|e| Error::Parse(format!("invalid JSON or YAML: {e}")))
-    })
+    match serde_json::from_str(s) {
+        Ok(val) => return Ok(val),
+        Err(json_err) => {
+            match serde_yml::from_str::<Value>(s) {
+                Ok(val) => return Ok(val),
+                Err(yaml_err) => {
+                    // For JSON-like input, prefer JSON error (more accurate position)
+                    if s.trim_start().starts_with('{') || s.trim_start().starts_with('[') {
+                        return Err(Error::parse(
+                            format!("invalid JSON: {json_err}"),
+                            Some(json_err.line()),
+                            Some(json_err.column()),
+                        ));
+                    }
+                    // For YAML input, use YAML error with position if available
+                    let (line, col) = yaml_err.location().map_or(
+                        (None, None),
+                        |loc| (Some(loc.line()), Some(loc.column())),
+                    );
+                    return Err(Error::parse(
+                        format!("invalid YAML: {yaml_err}"),
+                        line,
+                        col,
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// Parse a request from a JSON/YAML value, expanding header shortcuts.
@@ -279,6 +327,38 @@ mod tests {
     #[test]
     fn parse_invalid() {
         assert!(parse("{{invalid}}").is_err());
+    }
+
+    #[test]
+    fn parse_error_json_has_position() {
+        let err = parse("{g: broken, b: {").unwrap_err();
+        match err {
+            Error::Parse { line, column, msg, .. } => {
+                assert!(line.is_some(), "should have line");
+                assert!(column.is_some(), "should have column");
+                assert!(msg.contains("invalid JSON"), "msg: {msg}");
+            }
+            _ => panic!("expected Parse error"),
+        }
+    }
+
+    #[test]
+    fn parse_error_yaml_has_position() {
+        let err = parse("g: [\nunclosed").unwrap_err();
+        match err {
+            Error::Parse { msg, .. } => {
+                assert!(msg.contains("invalid YAML"), "msg: {msg}");
+            }
+            _ => panic!("expected Parse error"),
+        }
+    }
+
+    #[test]
+    fn parse_error_display_includes_position() {
+        let err = parse("{broken").unwrap_err();
+        let display = format!("{err}");
+        assert!(display.contains("parse error:"), "display: {display}");
+        assert!(display.contains("line"), "should include position: {display}");
     }
 
     // --- parse_request ---
