@@ -3,7 +3,7 @@
 `yttp` is a Rust library providing a JSON/YAML façade for HTTP requests and responses.
 It offers header shortcuts, smart auth, content-type-driven body encoding, and structured response formatting.
 
-Used by [`yurl`](https://github.com/ogheorghies/jurl) — the CLI HTTP client built on `yttp`.
+Used by [`yurl`](https://github.com/ogheorghies/yurl) — the CLI HTTP client built on `yttp`.
 
 ```rust
 use yttp::{parse, parse_request, Request, Response, Status, format_response};
@@ -43,8 +43,9 @@ h:
   # key shortcuts — Authorization
   a!: my-token                       # → Authorization: Bearer my-token (bare token)
   a!: [user, pass]                   # → Authorization: Basic base64(user:pass)
-  a!: Basic dXNlcjpwYXNz            # → passthrough (string with space = has scheme)
-  a!: basic!user:pass                # → explicit prefix form
+  a!: Basic dXNlcjpwYXNz             # → passthrough (string with space = has scheme)
+  a!: basic!user:pass                # → explicit prefix form: Basic base64(user:pass)
+  a!: bearer!my-token                # → explicit prefix form: Bearer my-token
 
   # key shortcuts — Content-Type
   c!: f!                             # → Content-Type: application/x-www-form-urlencoded
@@ -75,7 +76,7 @@ Default structured format: `{s, h, b}`
 
 ```yaml
 # --- Response (output) status ---
-s: {v: HTTP/1.1, c: 200, t: OK}     # inline object (default via status_inline())
+s: {v: HTTP/1.1, c: 200, t: OK}      # inline object (default via status_inline())
 s: HTTP/1.1 200 OK                   # raw status line (via status.line)
 
 # --- Response (output) headers ---
