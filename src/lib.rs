@@ -100,15 +100,19 @@ pub fn parse(s: &str) -> Result<Value> {
             match serde_yml::from_str::<Value>(s) {
                 Ok(val) => return Ok(val),
                 Err(yaml_err) => {
-                    // For JSON-like input, prefer JSON error (more accurate position)
-                    if s.trim_start().starts_with('{') || s.trim_start().starts_with('[') {
+                    // Decide whether to show JSON or YAML error.
+                    // If input looks like actual JSON (quoted keys), prefer JSON error.
+                    // If input looks like YAML flow (unquoted keys), prefer YAML error.
+                    let trimmed = s.trim_start();
+                    let looks_like_json = trimmed.starts_with("{\"") || trimmed.starts_with("[");
+                    if looks_like_json {
                         return Err(Error::parse(
                             format!("invalid JSON: {json_err}"),
                             Some(json_err.line()),
                             Some(json_err.column()),
                         ));
                     }
-                    // For YAML input, use YAML error with position if available
+                    // YAML flow or block — use YAML error
                     let (line, col) = yaml_err.location().map_or(
                         (None, None),
                         |loc| (Some(loc.line()), Some(loc.column())),
@@ -330,8 +334,27 @@ mod tests {
     }
 
     #[test]
+    fn parse_yaml_flow_with_explicit_null() {
+        let val = parse("{g: google.com, adad: null}").unwrap();
+        assert_eq!(val["g"], "google.com");
+        assert!(val["adad"].is_null());
+    }
+
+    #[test]
+    fn parse_yaml_flow_error_not_json_error() {
+        // {g: google.com, adad:} is YAML flow style — if it fails,
+        // the error should be a YAML error, not "invalid JSON"
+        let result = parse("{g: google.com, adad:}");
+        if let Err(e) = &result {
+            let msg = format!("{e}");
+            assert!(!msg.contains("invalid JSON"), "should show YAML error for YAML input: {msg}");
+        }
+    }
+
+    #[test]
     fn parse_error_json_has_position() {
-        let err = parse("{g: broken, b: {").unwrap_err();
+        // Use actual JSON syntax (quoted keys) to trigger JSON error path
+        let err = parse(r#"{"g": "broken", "b": {}"#).unwrap_err();
         match err {
             Error::Parse { line, column, msg, .. } => {
                 assert!(line.is_some(), "should have line");
