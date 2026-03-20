@@ -86,6 +86,7 @@ pub fn parse_request(val: &Value) -> Result<Request> {
     let mut url = None;
     let mut headers = None;
     let mut body = None;
+    let mut query = None;
 
     for (key, v) in obj {
         if let Some(m) = resolve_method(key) {
@@ -99,6 +100,7 @@ pub fn parse_request(val: &Value) -> Result<Request> {
             match key.to_lowercase().as_str() {
                 "h" | "headers" => headers = Some(v.clone()),
                 "b" | "body" => body = Some(v.clone()),
+                "q" | "query" => query = Some(v.clone()),
                 _ => {}
             }
         }
@@ -109,11 +111,28 @@ pub fn parse_request(val: &Value) -> Result<Request> {
         .unwrap_or_default();
     expand_headers(&mut header_map);
 
+    let mut final_url = url
+        .ok_or_else(|| Error::Request("no URL found".into()))?;
+
+    if let Some(q) = query {
+        let q_obj = q
+            .as_object()
+            .ok_or_else(|| Error::Request("q must be an object".into()))?;
+        if !q_obj.is_empty() {
+            let query_string = build_query_string(q_obj);
+            if final_url.contains('?') {
+                final_url.push('&');
+            } else {
+                final_url.push('?');
+            }
+            final_url.push_str(&query_string);
+        }
+    }
+
     Ok(Request {
         method: method
             .ok_or_else(|| Error::Request("no HTTP method found".into()))?,
-        url: url
-            .ok_or_else(|| Error::Request("no URL found".into()))?,
+        url: final_url,
         headers: header_map,
         body,
     })
@@ -171,6 +190,38 @@ pub fn headers_to_raw(headers: &Map<String, Value>) -> String {
         }
     }
     raw
+}
+
+fn encode_query_component(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+fn value_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Null => String::new(),
+        _ => v.to_string(),
+    }
+}
+
+fn build_query_string(obj: &Map<String, Value>) -> String {
+    let mut pairs = Vec::new();
+    for (k, v) in obj {
+        let key = encode_query_component(k);
+        match v {
+            Value::Array(arr) => {
+                for item in arr {
+                    pairs.push(format!("{}={}", key, encode_query_component(&value_to_string(item))));
+                }
+            }
+            _ => {
+                pairs.push(format!("{}={}", key, encode_query_component(&value_to_string(v))));
+            }
+        }
+    }
+    pairs.join("&")
 }
 
 fn resolve_method(key: &str) -> Option<&'static str> {
@@ -352,6 +403,57 @@ mod tests {
             let req = parse_request(&val).unwrap();
             assert_eq!(req.headers["Accept"], expected, "prefix {shortcut}");
         }
+    }
+
+    // --- query params ---
+
+    #[test]
+    fn query_basic() {
+        let val = parse("{g: https://example.com/search, q: {term: foo, limit: 10}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com/search?term=foo&limit=10");
+    }
+
+    #[test]
+    fn query_merge_existing() {
+        let val = parse("{g: https://example.com/search?x=1, q: {y: 2}}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com/search?x=1&y=2");
+    }
+
+    #[test]
+    fn query_array_repeated_keys() {
+        let val = parse(r#"{"g": "https://example.com/search", "q": {"tags": ["a", "b"]}}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com/search?tags=a&tags=b");
+    }
+
+    #[test]
+    fn query_url_encoding() {
+        let val = parse(r#"{"g": "https://example.com/search", "q": {"q": "hello world"}}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com/search?q=hello+world");
+    }
+
+    #[test]
+    fn query_absent_noop() {
+        let val = parse("{g: https://example.com}").unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com");
+    }
+
+    #[test]
+    fn query_empty_noop() {
+        let val = parse(r#"{"g": "https://example.com", "q": {}}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com");
+    }
+
+    #[test]
+    fn query_boolean_value() {
+        let val = parse(r#"{"g": "https://example.com", "q": {"active": true}}"#).unwrap();
+        let req = parse_request(&val).unwrap();
+        assert_eq!(req.url, "https://example.com?active=true");
     }
 
     // --- parse_url ---

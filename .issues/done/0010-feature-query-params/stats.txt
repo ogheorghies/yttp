@@ -1,0 +1,9 @@
+Elapsed time: 2m 9s
+
+Token delta (after - before):
+  inputTokens:          +84
+  outputTokens:         +1585
+  cacheCreationTokens:  +24455
+  cacheReadTokens:      +943986
+  totalTokens:          +970110
+  totalCost:            +$0.66

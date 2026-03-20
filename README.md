@@ -63,6 +63,13 @@ h:
   Accept: t!/csv                     # → text/csv
   Accept: i!/png                     # → image/png
 
+# --- Request (input) query params ---
+q:                                   # merged into URL query string
+  term: foo                          #   ?term=foo&limit=10
+  limit: 10                          #   URL-encoded automatically
+                                     #   arrays → repeated keys: tags: [a, b] → tags=a&tags=b
+                                     #   appends to existing ?params if present
+
 # --- Request (input) body ---
 b:                                   # encoding depends on Content-Type:
   city: Berlin                       #   application/json (default, c!: j! is implied)
@@ -104,7 +111,7 @@ b: "SGVsbG8gV29ybGQ=..."
 | Function | Description |
 |---|---|
 | `parse(s)` | Parse JSON or YAML string into `Value` |
-| `parse_request(val)` | Parse request value, expand header shortcuts → `Request` |
+| `parse_request(val)` | Parse request value, expand header shortcuts, merge `q:` into URL → `Request` |
 | `parse_url(url)` | Parse URL into components → `UrlParts` |
 | `encode_body(bytes)` | Smart body encoding: JSON → value, UTF-8 → string, binary → base64 |
 | `status_inline(status)` | Format status as `{v, c, t}` object |
