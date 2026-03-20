@@ -114,20 +114,7 @@ pub fn parse_request(val: &Value) -> Result<Request> {
     let mut final_url = url
         .ok_or_else(|| Error::Request("no URL found".into()))?;
 
-    if let Some(q) = query {
-        let q_obj = q
-            .as_object()
-            .ok_or_else(|| Error::Request("q must be an object".into()))?;
-        if !q_obj.is_empty() {
-            let query_string = build_query_string(q_obj);
-            if final_url.contains('?') {
-                final_url.push('&');
-            } else {
-                final_url.push('?');
-            }
-            final_url.push_str(&query_string);
-        }
-    }
+    append_query_to_url(&mut final_url, &query)?;
 
     Ok(Request {
         method: method
@@ -206,7 +193,11 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
-fn build_query_string(obj: &Map<String, Value>) -> String {
+/// Build a URL query string from an object of key-value pairs.
+///
+/// Values are URL-encoded. Arrays expand to repeated keys:
+/// `tags: [a, b]` → `tags=a&tags=b`.
+pub fn build_query_string(obj: &Map<String, Value>) -> String {
     let mut pairs = Vec::new();
     for (k, v) in obj {
         let key = encode_query_component(k);
@@ -222,6 +213,28 @@ fn build_query_string(obj: &Map<String, Value>) -> String {
         }
     }
     pairs.join("&")
+}
+
+/// Append query parameters from a `q:` value to a URL string.
+///
+/// No-ops if `q` is `None` or an empty object. Appends with `&` if the URL
+/// already has a `?`, otherwise adds `?`.
+pub fn append_query_to_url(url: &mut String, q: &Option<Value>) -> Result<()> {
+    let Some(q) = q else { return Ok(()) };
+    let obj = q
+        .as_object()
+        .ok_or_else(|| Error::Request("q must be an object".into()))?;
+    if obj.is_empty() {
+        return Ok(());
+    }
+    let qs = build_query_string(obj);
+    if url.contains('?') {
+        url.push('&');
+    } else {
+        url.push('?');
+    }
+    url.push_str(&qs);
+    Ok(())
 }
 
 fn resolve_method(key: &str) -> Option<&'static str> {

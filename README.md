@@ -118,5 +118,7 @@ b: "SGVsbG8gV29ybGQ=..."
 | `format_response(resp)` | Full response as `{s, h, b}` value |
 | `headers_to_raw(headers)` | Headers map to raw HTTP string |
 | `expand_headers(headers)` | Expand shortcut keys and values in-place |
+| `build_query_string(obj)` | Build URL query string from key-value object |
+| `append_query_to_url(url, q)` | Append `q:` params to URL string (no-op if `None`/empty) |
 
 All functions that can fail return `yttp::Result<T>`.
