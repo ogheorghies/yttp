@@ -289,7 +289,7 @@ pub fn append_query_to_url(url: &mut String, q: &Option<Value>) -> Result<()> {
     Ok(())
 }
 
-fn resolve_method(key: &str) -> Option<&'static str> {
+pub fn resolve_method(key: &str) -> Option<&'static str> {
     match key.to_lowercase().as_str() {
         "get" | "g" => Some("GET"),
         "post" | "p" => Some("POST"),
