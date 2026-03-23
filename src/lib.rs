@@ -10,7 +10,7 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde_json::{Map, Value};
 use std::fmt;
 
-pub use shortcut::expand_headers;
+pub use shortcut::{expand_headers, collapse_headers};
 
 /// Error type for yttp operations.
 #[derive(Debug)]
