@@ -87,45 +87,77 @@ pub struct Response {
     pub body: Vec<u8>,
 }
 
-/// Parse a JSON/YAML string into a serde_json::Value.
+/// Deserialize a JSON/YAML string into a Value (auto-detect format).
 ///
-/// Tries JSON first, then YAML. On failure, returns `Error::Parse` with
-/// position info extracted from the serde error. For JSON-like input
-/// (starts with `{`), the JSON parser's position is preferred since YAML
-/// may parse partial JSON differently.
-pub fn parse(s: &str) -> Result<Value> {
+/// Tries JSON first, then YAML. No shortcut expansion — returns the raw parsed Value.
+/// For expansion, call [`expand`] on the result.
+pub fn from_str(s: &str) -> Result<Value> {
     match serde_json::from_str(s) {
-        Ok(val) => return Ok(val),
+        Ok(val) => Ok(val),
         Err(json_err) => {
             match serde_yml::from_str::<Value>(s) {
-                Ok(val) => return Ok(val),
+                Ok(val) => Ok(val),
                 Err(yaml_err) => {
-                    // Decide whether to show JSON or YAML error.
-                    // If input looks like actual JSON (quoted keys), prefer JSON error.
-                    // If input looks like YAML flow (unquoted keys), prefer YAML error.
                     let trimmed = s.trim_start();
                     let looks_like_json = trimmed.starts_with("{\"") || trimmed.starts_with("[");
                     if looks_like_json {
-                        return Err(Error::parse(
+                        Err(Error::parse(
                             format!("invalid JSON: {json_err}"),
                             Some(json_err.line()),
                             Some(json_err.column()),
-                        ));
+                        ))
+                    } else {
+                        let (line, col) = yaml_err.location().map_or(
+                            (None, None),
+                            |loc| (Some(loc.line()), Some(loc.column())),
+                        );
+                        Err(Error::parse(
+                            format!("invalid YAML: {yaml_err}"),
+                            line,
+                            col,
+                        ))
                     }
-                    // YAML flow or block — use YAML error
-                    let (line, col) = yaml_err.location().map_or(
-                        (None, None),
-                        |loc| (Some(loc.line()), Some(loc.column())),
-                    );
-                    return Err(Error::parse(
-                        format!("invalid YAML: {yaml_err}"),
-                        line,
-                        col,
-                    ));
                 }
             }
         }
     }
+}
+
+/// Deserialize a JSON string into a Value. Fails if the input is not valid JSON.
+pub fn from_json(s: &str) -> Result<Value> {
+    serde_json::from_str(s).map_err(|e| {
+        Error::parse(format!("invalid JSON: {e}"), Some(e.line()), Some(e.column()))
+    })
+}
+
+/// Deserialize a YAML string into a Value. Does not attempt JSON parsing.
+pub fn from_yaml(s: &str) -> Result<Value> {
+    serde_yml::from_str::<Value>(s).map_err(|e| {
+        let (line, col) = e.location().map_or(
+            (None, None),
+            |loc| (Some(loc.line()), Some(loc.column())),
+        );
+        Error::parse(format!("invalid YAML: {e}"), line, col)
+    })
+}
+
+/// Expand yttp shortcuts on a parsed Value.
+///
+/// Expands header key and value shortcuts in the `h` field:
+/// `a!` → `Authorization`, `bearer!tok` → `Bearer tok`, etc.
+/// Other fields are left unchanged.
+pub fn expand(mut val: Value) -> Result<Value> {
+    if let Some(obj) = val.as_object_mut() {
+        if let Some(Value::Object(h)) = obj.get_mut("h") {
+            expand_headers(h);
+        }
+    }
+    Ok(val)
+}
+
+/// Convenience: deserialize + expand. Equivalent to `expand(from_str(s)?)`.
+pub fn parse(s: &str) -> Result<Value> {
+    expand(from_str(s)?)
 }
 
 /// Parse a request from a JSON/YAML value, expanding header shortcuts.
@@ -317,7 +349,16 @@ mod tests {
 
     #[test]
     fn parse_yaml_block() {
+        // parse = from_str + expand, so shortcuts are expanded
         let val = parse("g: https://example.com\nh:\n  Accept: j!\n").unwrap();
+        assert_eq!(val["g"], "https://example.com");
+        assert_eq!(val["h"]["Accept"], "application/json");
+    }
+
+    #[test]
+    fn from_str_does_not_expand() {
+        // from_str is raw deserialization — no expansion
+        let val = from_str("g: https://example.com\nh:\n  Accept: j!\n").unwrap();
         assert_eq!(val["g"], "https://example.com");
         assert_eq!(val["h"]["Accept"], "j!");
     }
@@ -326,6 +367,28 @@ mod tests {
     fn parse_yaml_flow() {
         let val = parse("{g: https://example.com, h: {Accept: j!}}").unwrap();
         assert_eq!(val["g"], "https://example.com");
+        assert_eq!(val["h"]["Accept"], "application/json");
+    }
+
+    #[test]
+    fn from_json_strict() {
+        let val = from_json(r#"{"g": "https://example.com"}"#).unwrap();
+        assert_eq!(val["g"], "https://example.com");
+        assert!(from_json("{g: example.com}").is_err());
+    }
+
+    #[test]
+    fn from_yaml_only() {
+        let val = from_yaml("{g: https://example.com}").unwrap();
+        assert_eq!(val["g"], "https://example.com");
+    }
+
+    #[test]
+    fn expand_expands_headers() {
+        let val = from_str("{g: example.com, h: {a!: tok}}").unwrap();
+        let expanded = expand(val).unwrap();
+        assert_eq!(expanded["h"]["Authorization"], "Bearer tok");
+        assert!(expanded["h"].get("a!").is_none());
     }
 
     #[test]
