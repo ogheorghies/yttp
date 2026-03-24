@@ -122,3 +122,19 @@ b: "SGVsbG8gV29ybGQ=..."
 | `append_query_to_url(url, q)` | Append `q:` params to URL string (no-op if `None`/empty) |
 
 All functions that can fail return `yttp::Result<T>`.
+
+## Performance
+
+Per-call latency (criterion):
+
+```
+from_json               430 ns    strict JSON — fastest path
+from_str (json)         540 ns    auto-detect, JSON succeeds first try
+from_yaml             2,700 ns    YAML only — no JSON attempt
+from_str (yaml flow)  3,400 ns    auto-detect, JSON fails then YAML
+expand_headers          730 ns    shortcut expansion (a! → Authorization, etc.)
+```
+
+Format-hinted functions (`from_json`, `from_yaml`) are ~20% faster than `from_str` by skipping the failed format attempt. YAML parsing (serde_yml) is ~6x slower than JSON (serde_json).
+
+Run `cargo bench` to reproduce.
