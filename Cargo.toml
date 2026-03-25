@@ -1,6 +1,6 @@
 [package]
 name = "yttp"
-version = "0.0.7"
+version = "0.0.8"
 edition = "2024"
 license = "MIT"
 description = "Better HTTP - a JSON/YAML façade for HTTP requests and responses"

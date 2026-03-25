@@ -118,8 +118,12 @@ b: "SGVsbG8gV29ybGQ=..."
 | `format_response(resp)` | Full response as `{s, h, b}` value |
 | `headers_to_raw(headers)` | Headers map to raw HTTP string |
 | `expand_headers(headers)` | Expand shortcut keys and values in-place |
-| `build_query_string(obj)` | Build URL query string from key-value object |
-| `append_query_to_url(url, q)` | Append `q:` params to URL string (no-op if `None`/empty) |
+| `build_query_string(obj, array_join)` | Build URL query string with configurable array style |
+| `append_query_to_url(url, q, array_join)` | Append `q:` params to URL (no-op if `None`/empty) |
+| `comma_join` | Array strategy: `tags=a,b` |
+| `repeat_keys` | Array strategy: `tags=a&tags=b` |
+| `bracket_join` | Array strategy: `tags[]=a&tags[]=b` |
+| `semicolon_join` | Array strategy: `tags=a;b` |
 
 All functions that can fail return `yttp::Result<T>`.
 

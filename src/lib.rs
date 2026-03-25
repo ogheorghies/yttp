@@ -198,7 +198,7 @@ pub fn parse_request(val: &Value) -> Result<Request> {
     let mut final_url = url
         .ok_or_else(|| Error::Request("no URL found".into()))?;
 
-    append_query_to_url(&mut final_url, &query)?;
+    append_query_to_url(&mut final_url, &query, comma_join)?;
 
     Ok(Request {
         method: method
@@ -263,7 +263,7 @@ pub fn headers_to_raw(headers: &Map<String, Value>) -> String {
     raw
 }
 
-fn encode_query_component(s: &str) -> String {
+pub fn encode_query_component(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
@@ -277,22 +277,54 @@ fn value_to_string(v: &Value) -> String {
     }
 }
 
+/// Array join strategy: given a key and its array values, produce (key, value) pairs.
+/// The caller decides how arrays are serialized in the query string.
+
+/// Array join strategies: given a key and array values, produce encoded query pairs.
+/// Each pair is a ready-to-use `key=value` string (already URL-encoded).
+
+/// Comma-separated: `tags: [a, b]` → `tags=a,b`
+pub fn comma_join(key: &str, vals: &[String]) -> Vec<String> {
+    let encoded_vals: Vec<String> = vals.iter().map(|v| encode_query_component(v)).collect();
+    vec![format!("{}={}", encode_query_component(key), encoded_vals.join(","))]
+}
+
+/// Repeated keys: `tags: [a, b]` → `tags=a&tags=b`
+pub fn repeat_keys(key: &str, vals: &[String]) -> Vec<String> {
+    let ek = encode_query_component(key);
+    vals.iter().map(|v| format!("{ek}={}", encode_query_component(v))).collect()
+}
+
+/// Bracket notation: `tags: [a, b]` → `tags[]=a&tags[]=b`
+pub fn bracket_join(key: &str, vals: &[String]) -> Vec<String> {
+    let ek = format!("{}[]", encode_query_component(key));
+    vals.iter().map(|v| format!("{ek}={}", encode_query_component(v))).collect()
+}
+
+/// Semicolon-separated: `tags: [a, b]` → `tags=a;b`
+pub fn semicolon_join(key: &str, vals: &[String]) -> Vec<String> {
+    let encoded_vals: Vec<String> = vals.iter().map(|v| encode_query_component(v)).collect();
+    vec![format!("{}={}", encode_query_component(key), encoded_vals.join(";"))]
+}
+
 /// Build a URL query string from an object of key-value pairs.
 ///
-/// Values are URL-encoded. Arrays expand to repeated keys:
-/// `tags: [a, b]` → `tags=a&tags=b`.
-pub fn build_query_string(obj: &Map<String, Value>) -> String {
+/// Values are URL-encoded. The `array_join` strategy controls how array
+/// values are serialized — use `comma_join`, `repeat_keys`, `bracket_join`,
+/// or a custom closure.
+pub fn build_query_string(
+    obj: &Map<String, Value>,
+    array_join: impl Fn(&str, &[String]) -> Vec<String>,
+) -> String {
     let mut pairs = Vec::new();
     for (k, v) in obj {
-        let key = encode_query_component(k);
         match v {
             Value::Array(arr) => {
-                for item in arr {
-                    pairs.push(format!("{}={}", key, encode_query_component(&value_to_string(item))));
-                }
+                let vals: Vec<String> = arr.iter().map(|item| value_to_string(item)).collect();
+                pairs.extend(array_join(k, &vals));
             }
             _ => {
-                pairs.push(format!("{}={}", key, encode_query_component(&value_to_string(v))));
+                pairs.push(format!("{}={}", encode_query_component(k), encode_query_component(&value_to_string(v))));
             }
         }
     }
@@ -303,7 +335,11 @@ pub fn build_query_string(obj: &Map<String, Value>) -> String {
 ///
 /// No-ops if `q` is `None` or an empty object. Appends with `&` if the URL
 /// already has a `?`, otherwise adds `?`.
-pub fn append_query_to_url(url: &mut String, q: &Option<Value>) -> Result<()> {
+pub fn append_query_to_url(
+    url: &mut String,
+    q: &Option<Value>,
+    array_join: impl Fn(&str, &[String]) -> Vec<String>,
+) -> Result<()> {
     let Some(q) = q else { return Ok(()) };
     let obj = q
         .as_object()
@@ -311,7 +347,7 @@ pub fn append_query_to_url(url: &mut String, q: &Option<Value>) -> Result<()> {
     if obj.is_empty() {
         return Ok(());
     }
-    let qs = build_query_string(obj);
+    let qs = build_query_string(obj, array_join);
     if url.contains('?') {
         url.push('&');
     } else {
@@ -601,10 +637,35 @@ mod tests {
     }
 
     #[test]
-    fn query_array_repeated_keys() {
+    fn query_array_comma_default() {
+        // parse_request uses comma_join by default
         let val = parse(r#"{"g": "https://example.com/search", "q": {"tags": ["a", "b"]}}"#).unwrap();
         let req = parse_request(&val).unwrap();
-        assert_eq!(req.url, "https://example.com/search?tags=a&tags=b");
+        assert_eq!(req.url, "https://example.com/search?tags=a,b");
+    }
+
+    #[test]
+    fn query_array_repeat_keys() {
+        let obj = serde_json::json!({"tags": ["a", "b"]}).as_object().unwrap().clone();
+        assert_eq!(build_query_string(&obj, repeat_keys), "tags=a&tags=b");
+    }
+
+    #[test]
+    fn query_array_bracket() {
+        let obj = serde_json::json!({"tags": ["a", "b"]}).as_object().unwrap().clone();
+        assert_eq!(build_query_string(&obj, bracket_join), "tags[]=a&tags[]=b");
+    }
+
+    #[test]
+    fn query_array_comma() {
+        let obj = serde_json::json!({"tags": ["a", "b"]}).as_object().unwrap().clone();
+        assert_eq!(build_query_string(&obj, comma_join), "tags=a,b");
+    }
+
+    #[test]
+    fn query_array_semicolon() {
+        let obj = serde_json::json!({"tags": ["a", "b"]}).as_object().unwrap().clone();
+        assert_eq!(build_query_string(&obj, semicolon_join), "tags=a;b");
     }
 
     #[test]
